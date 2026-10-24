@@ -941,6 +941,22 @@ class MainWindow(QMainWindow):
         if self._learning_step == "r2":
             change = self._largest_axis_change(self._learning_axis_baseline, snapshot.axes)
             if not change or change[2] < 0.55:
+                rising = [
+                    index for index, state in enumerate(snapshot.buttons)
+                    if state and (index >= len(self._learning_previous_buttons) or not self._learning_previous_buttons[index])
+                ]
+                self._learning_previous_buttons = snapshot.buttons
+                if rising:
+                    button_index = rising[0]
+                    self._input_config.setdefault("button_indices", {})["r2"] = button_index
+                    manual = self._input_config.setdefault("manual_drive", {})
+                    manual["trigger_axis"] = None
+                    self._trigger_spins["r2"].setValue(-1)
+                    self._mapping_spins["r2"].setValue(button_index)
+                    self._save_learned_values()
+                    self._learning_axis_baseline = snapshot.axes
+                    self._learning_step = "linear"
+                    self._set_banner("Digital R2 detected · release it, then push the left stick fully forward")
                 return
             axis, delta, _magnitude = change
             direction = "positive" if delta > 0 else "negative"
@@ -1267,7 +1283,8 @@ class MainWindow(QMainWindow):
                 self._learning_step = ""
                 self._set_banner("Controller disconnected · setup canceled")
             self._set_label_text(self.connection_badge, "●  CONTROLLER DISCONNECTED")
-            self._set_label_text(self.axis_values, "No controller detected")
+            diagnostic = snapshot.name or "SDL sees no joystick devices"
+            self._set_label_text(self.axis_values, f"No controller detected · {diagnostic}")
             for index, label in enumerate(self._raw_button_labels):
                 self._set_raw_button(label, index, False)
             self._set_label_text(self.deadman_label, "R2 dead-man: inactive · no controller")
