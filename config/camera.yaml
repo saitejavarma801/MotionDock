@@ -1,0 +1,3 @@
+mode: python_script
+script_path: /home/stv/cam.py
+workspace: ''

@@ -1,0 +1,9 @@
+motiondock_supervisor:
+  ros__parameters:
+    output_topic: /cmd_vel
+    manual_input_topic: /motiondock/cmd_vel_manual
+    autonomous_input_topic: /motiondock/cmd_vel_autonomous
+    mode_topic: /motiondock/mode
+    max_linear_velocity: 0.3
+    max_angular_velocity: 0.8
+    command_timeout: 0.35

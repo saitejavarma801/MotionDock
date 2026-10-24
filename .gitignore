@@ -1,0 +1,49 @@
+# ROS 2 build artifacts
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE settings
+.vscode/
+.idea/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Credentials and private keys
+*.pem
+*.key
+id_rsa
+id_ed25519
+
+# Logs and temporary files
+*.log
+*.tmp
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# Private docking configuration
+config/.docking_code
+
+# Local user-task files
+user_tasks/
+src/motiondock_user_tasks/tasks/*.py
+src/motiondock_user_tasks/tasks/*.cpp
+src/motiondock_user_tasks/tasks/*.cc
+src/motiondock_user_tasks/tasks/*.cxx

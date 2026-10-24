@@ -1,0 +1,45 @@
+device_name: ''
+manual_drive:
+  enable_input: r2
+  enable_mode: hold
+  trigger_axis: 5
+  trigger_active_when: positive
+  trigger_threshold: 0.3
+  trigger_hysteresis: 0.08
+  left_stick:
+    linear_axis: 1
+    angular_axis: 0
+  linear_axis_direction: -1.0
+  angular_axis_direction: -1.0
+  stick_deadzone: 0.08
+  max_linear_velocity: 0.3
+  max_angular_velocity: 0.8
+axis_indices:
+  l2: 2
+axis_active_when:
+  l2: positive
+axis_thresholds:
+  l2: 0.65
+axis_hysteresis:
+  l2: 0.08
+button_indices:
+  cross: 0
+  circle: 1
+  triangle: 2
+  square: 3
+  l1: 4
+  l2: 6
+  r1: 5
+  r2: 7
+  options: 9
+  create: 8
+  ps: 10
+  dpad_up: 14
+  dpad_down: 13
+  dpad_left: 15
+  dpad_right: 16
+mode_buttons:
+  manual: cross
+  autonomous: triangle
+  stop: square
+camera_button: circle
