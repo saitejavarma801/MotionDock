@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QLineEdit,
     QScrollArea,
+    QSpinBox,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -40,15 +41,36 @@ from motiondock.tasks import TaskManager
 
 
 def find_workspace() -> Path:
-    current = Path.cwd().resolve()
-    if (current / "src" / "motiondock" / "package.xml").exists():
-        return current
-    for value in os.environ.get("AMENT_PREFIX_PATH", "").split(os.pathsep):
-        prefix = Path(value)
-        for candidate in (prefix.parent.parent, prefix.parent):
-            if (candidate / "src" / "motiondock" / "package.xml").exists():
-                return candidate.resolve()
-    return Path(__file__).resolve().parents[3]
+    def is_workspace(path: Path) -> bool:
+        return (
+            (path / "src" / "motiondock" / "package.xml").is_file()
+            and (path / "config" / "controller.yaml").is_file()
+        )
+
+    roots: list[Path] = []
+    explicit = os.environ.get("MOTIONDOCK_WORKSPACE", "").strip()
+    if explicit:
+        roots.append(Path(explicit).expanduser())
+    roots.append(Path.cwd())
+    roots.extend(Path(prefix) for prefix in os.environ.get("AMENT_PREFIX_PATH", "").split(os.pathsep) if prefix)
+    roots.extend((Path(__file__).absolute(), Path(__file__).resolve()))
+
+    checked: set[Path] = set()
+    for root in roots:
+        try:
+            root = root.resolve()
+        except OSError:
+            continue
+        for candidate in (root, *root.parents):
+            if candidate in checked:
+                continue
+            checked.add(candidate)
+            if is_workspace(candidate):
+                return candidate
+    raise FileNotFoundError(
+        "Could not locate the MotionDock workspace. Source its install/setup.bash, "
+        "launch from the workspace root, or set MOTIONDOCK_WORKSPACE to the workspace path."
+    )
 
 
 WORKSPACE = find_workspace()
@@ -81,6 +103,7 @@ CONTROL_POSITIONS = {
 SUPERVISOR_CONFIG = WORKSPACE / "config" / "supervisor.yaml"
 CAMERA_CONFIG = WORKSPACE / "config" / "camera.yaml"
 AUTONOMY_CONFIG = WORKSPACE / "config" / "autonomy.yaml"
+UI_CONFIG = WORKSPACE / "config" / "interface.yaml"
 
 
 class IndexInput(QLineEdit):
@@ -114,6 +137,8 @@ class MainWindow(QMainWindow):
         self._previous_inputs: dict[str, bool] = {}
         self._input_armed = False
         self._processes: dict[str, QProcess] = {}
+        self._stopping_process_ids: set[int] = set()
+        self._control_cards: list[QFrame] = []
         self._input_config: dict = {}
         self._mapping_spins: dict[str, IndexInput] = {}
         self._trigger_spins: dict[str, IndexInput] = {}
@@ -123,6 +148,8 @@ class MainWindow(QMainWindow):
         self._status_labels: dict[str, QLabel] = {}
         self._shown_inputs: dict[str, bool] = {}
         self._task_labels: dict[str, QLabel] = {}
+        self._task_hold_started: dict[str, float] = {}
+        self._task_stop_triggered: set[str] = set()
         self._axis_active: dict[str, bool] = {}
         self._led_labels: dict[str, QLabel] = {}
         self.mode = "stop"
@@ -146,6 +173,7 @@ class MainWindow(QMainWindow):
         self.autonomy_process: QProcess | None = None
         self.supervisor_process: QProcess | None = None
         self._set_theme()
+        self._ui_settings = self._load_ui_settings()
 
         base = QWidget()
         base_layout = QVBoxLayout(base)
@@ -180,7 +208,13 @@ class MainWindow(QMainWindow):
         header.addWidget(self.stop_mode_button)
         self.autodock_button = QPushButton("⚡  Auto-Dock")
         self.autodock_button.setObjectName("primary")
-        self.autodock_button.clicked.connect(self.choose_autodock_file)
+        self._autodock_was_running_on_press = False
+        self._autodock_hold_started: float | None = None
+        self._autodock_hold_timer = QTimer(self)
+        self._autodock_hold_timer.setInterval(100)
+        self._autodock_hold_timer.timeout.connect(self._update_autodock_hold)
+        self.autodock_button.pressed.connect(self._autodock_pressed)
+        self.autodock_button.released.connect(self._autodock_released)
         header.addWidget(self.autodock_button)
         base_layout.addLayout(header)
 
@@ -189,17 +223,8 @@ class MainWindow(QMainWindow):
         base_layout.addWidget(self.activity_banner)
 
         config_row = QVBoxLayout()
-        autonomy_config_row = QHBoxLayout()
-        autonomy_config_row.addWidget(QLabel("Autonomous cmd_vel input"))
-        self.autonomous_topic_input = QLineEdit()
-        self.autonomous_topic_input.setMinimumWidth(210)
-        self.save_topic_button = QPushButton("Save topic")
-        self.save_topic_button.clicked.connect(self.save_autonomous_topic)
-        autonomy_config_row.addWidget(self.autonomous_topic_input, 1)
-        autonomy_config_row.addWidget(self.save_topic_button)
-        config_row.addLayout(autonomy_config_row)
         autonomy_launch_row = QHBoxLayout()
-        self.configure_autonomy_button = QPushButton("Configure autonomy launch")
+        self.configure_autonomy_button = QPushButton("Set autonomy folder & command")
         self.configure_autonomy_button.clicked.connect(self.configure_autonomy_launch)
         autonomy_launch_row.addWidget(self.configure_autonomy_button)
         self.autonomy_status = QLabel("Autonomy launch not configured")
@@ -229,7 +254,8 @@ class MainWindow(QMainWindow):
 
         info = QLabel(
             "Manual drive needs Manual mode + held R2 + left-stick movement. "
-            "Use Learn controller inputs or set indices below; green lights show active inputs. The base driver uses /cmd_vel."
+            "Use Learn controller inputs or set indices below; green lights show active inputs. "
+            "The supervisor sends velocity to the configured motor topic."
         )
         info.setObjectName("hint")
         base_layout.addWidget(info)
@@ -311,6 +337,34 @@ class MainWindow(QMainWindow):
         controls_heading.addWidget(self.save_mapping_button)
         base_layout.addLayout(controls_heading)
 
+        display_row = QHBoxLayout()
+        display_row.addWidget(QLabel("Card size"))
+        self.card_scale_input = QSpinBox()
+        self.card_scale_input.setRange(80, 150)
+        self.card_scale_input.setSuffix(" %")
+        self.card_scale_input.setValue(int(self._ui_settings.get("card_scale", 100)))
+        display_row.addWidget(self.card_scale_input)
+        display_row.addWidget(QLabel("Button text"))
+        self.card_font_input = QSpinBox()
+        self.card_font_input.setRange(9, 18)
+        self.card_font_input.setSuffix(" pt")
+        self.card_font_input.setValue(int(self._ui_settings.get("card_font", 11)))
+        display_row.addWidget(self.card_font_input)
+        display_row.addWidget(QLabel("Terminal height"))
+        self.terminal_height_input = QSpinBox()
+        self.terminal_height_input.setRange(70, 360)
+        self.terminal_height_input.setSuffix(" px")
+        self.terminal_height_input.setValue(int(self._ui_settings.get("terminal_height", 100)))
+        display_row.addWidget(self.terminal_height_input)
+        display_row.addWidget(QLabel("Terminal text"))
+        self.terminal_font_input = QSpinBox()
+        self.terminal_font_input.setRange(8, 18)
+        self.terminal_font_input.setSuffix(" pt")
+        self.terminal_font_input.setValue(int(self._ui_settings.get("terminal_font", 10)))
+        display_row.addWidget(self.terminal_font_input)
+        display_row.addStretch(1)
+        base_layout.addLayout(display_row)
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -322,6 +376,7 @@ class MainWindow(QMainWindow):
         grid.setVerticalSpacing(7)
         for index, (key, name, glyph, kind) in enumerate(CONTROLS):
             card = self._control_card(key, name, glyph, kind)
+            self._control_cards.append(card)
             grid.addWidget(card, index // 5, index % 5)
         for column in range(5):
             grid.setColumnStretch(column, 1)
@@ -330,10 +385,14 @@ class MainWindow(QMainWindow):
 
         self.activity_log = QTextEdit()
         self.activity_log.setReadOnly(True)
-        self.activity_log.setMaximumHeight(70)
+        self.activity_log.setMinimumHeight(70)
+        self.activity_log.setMaximumHeight(360)
         self.activity_log.setPlaceholderText("Task output and status")
         base_layout.addWidget(self.activity_log)
         self.setCentralWidget(base)
+        for setting in (self.card_scale_input, self.card_font_input, self.terminal_height_input, self.terminal_font_input):
+            setting.valueChanged.connect(self._apply_display_settings)
+        self._apply_display_settings()
 
         self.monitor = ControllerMonitor(CONFIG_PATH)
         self._load_input_mapping()
@@ -377,7 +436,23 @@ class MainWindow(QMainWindow):
             QPushButton#primary:hover { background: #278bfa; }
             QPushButton#stop { color: #ffe4e4; background: #672d38; border-color: #a84b59; }
             QPushButton#stop:hover { background: #813b48; }
+            QDialog, QMessageBox, QInputDialog, QFileDialog { background: #0d1624; color: #e6edf7; }
+            QDialog QLabel, QMessageBox QLabel, QInputDialog QLabel, QFileDialog QLabel { color: #dce8f8; }
+            QDialog QLineEdit, QDialog QTextEdit, QDialog QPlainTextEdit, QDialog QComboBox,
+            QFileDialog QLineEdit, QFileDialog QComboBox { color: #f4f7fc; background: #101d2d; border: 1px solid #344b69; border-radius: 7px; padding: 7px; selection-background-color: #1678e7; }
+            QDialog QTextEdit, QDialog QPlainTextEdit { min-width: 420px; min-height: 110px; }
+            QDialog QPushButton, QMessageBox QPushButton, QFileDialog QPushButton { color: #e5efff; background: #1a2a40; border: 1px solid #3b5879; border-radius: 8px; padding: 8px 14px; min-width: 72px; font-weight: 650; }
+            QDialog QPushButton:hover, QMessageBox QPushButton:hover, QFileDialog QPushButton:hover { background: #274363; border-color: #65aaf4; }
+            QDialog QDialogButtonBox, QMessageBox QDialogButtonBox { button-layout: 0; }
+            QFileDialog QListView, QFileDialog QTreeView { color: #dce8f8; background: #0b1422; alternate-background-color: #121f30; border: 1px solid #2a3d58; selection-background-color: #1e5da0; }
+            QFileDialog QHeaderView::section { color: #dce8f8; background: #162439; border: 0; padding: 6px; }
+            QComboBox QAbstractItemView { color: #e6edf7; background: #101d2d; selection-background-color: #1e5da0; border: 1px solid #344b69; }
+            QScrollBar:vertical { background: #0b1422; width: 12px; margin: 2px; }
+            QScrollBar::handle:vertical { background: #344b69; border-radius: 5px; min-height: 26px; }
         """)
+        app = QApplication.instance()
+        if app:
+            app.setStyleSheet(self.styleSheet())
 
     @staticmethod
     def _configure_index_spin(spin: IndexInput) -> None:
@@ -432,9 +507,56 @@ class MainWindow(QMainWindow):
         layout.addLayout(row)
         task_label = QLabel("No task assigned")
         task_label.setObjectName("taskState")
+        task_label.setWordWrap(True)
         self._task_labels[key] = task_label
         layout.addWidget(task_label)
         return card
+
+    @staticmethod
+    def _task_assignment_text(folder: str, command: str) -> str:
+        return f"Folder: {folder}\n$ {command}"
+
+    def _show_command_assignment(self, key: str, folder: str, command: str) -> None:
+        label = self._task_labels[key]
+        label.setText(self._task_assignment_text(folder, command))
+        label.setToolTip(f"Folder: {folder}\nCommand:\n{command}\n\nPress to launch · hold the assigned controller button for 3 seconds to stop.")
+
+    @staticmethod
+    def _load_ui_settings() -> dict:
+        try:
+            data = yaml.safe_load(UI_CONFIG.read_text(encoding="utf-8")) or {}
+            return data if isinstance(data, dict) else {}
+        except (OSError, yaml.YAMLError):
+            return {}
+
+    def _apply_display_settings(self) -> None:
+        scale = self.card_scale_input.value() / 100.0
+        font_pt = self.card_font_input.value()
+        for card in self._control_cards:
+            card.setMinimumHeight(int(118 * scale))
+            card.setStyleSheet(
+                f"QLabel#glyph {{ font-size: {23 * scale:.1f}px; }} "
+                f"QLabel#controlName {{ font-size: {font_pt + 2}px; }} "
+                f"QLabel#taskState, QLabel#inputState {{ font-size: {font_pt}px; }} "
+                f"QPushButton {{ font-size: {font_pt}px; padding: {max(5, int(8 * scale))}px; }}"
+            )
+        height = self.terminal_height_input.value()
+        self.activity_log.setMaximumHeight(height)
+        self.activity_log.setMinimumHeight(min(70, height))
+        terminal_font = self.activity_log.font()
+        terminal_font.setPointSize(self.terminal_font_input.value())
+        self.activity_log.setFont(terminal_font)
+        self._ui_settings.update({
+            "card_scale": self.card_scale_input.value(),
+            "card_font": font_pt,
+            "terminal_height": height,
+            "terminal_font": self.terminal_font_input.value(),
+        })
+        try:
+            UI_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+            UI_CONFIG.write_text(yaml.safe_dump(self._ui_settings, sort_keys=True), encoding="utf-8")
+        except OSError as exc:
+            self._log(f"Could not save display settings: {exc}")
 
     def _log(self, message: str) -> None:
         self.activity_log.append(message)
@@ -502,22 +624,21 @@ class MainWindow(QMainWindow):
             self._run_mode_task(mode_buttons.get("manual", "cross"))
         if mode == "autonomous":
             config = self._load_launch_file(AUTONOMY_CONFIG)
-            if config and config.get("workspace") and config.get("package") and config.get("launch_file"):
+            if config and config.get("workspace") and config.get("command"):
                 self._start_launch_process("autonomy", config)
             else:
-                self._log("Autonomous mode is active. Start a source that publishes to the configured gated input topic.")
+                self._log("Autonomous mode selected, but no folder and launch command are configured.")
             self._run_mode_task(mode_buttons.get("autonomous", "triangle"))
 
     def _run_mode_task(self, key: str) -> None:
-        if key and (TASKS.assigned_path(key) or TASKS.assigned_workspace(key)):
+        if key and (TASKS.assigned_path(key) or TASKS.assigned_workspace(key) or TASKS.assigned_command(key)):
             self.run_task(key)
 
     def _stop_assigned_task(self, key: str) -> None:
         process = self._processes.get(key)
         if process and process.state() != QProcess.ProcessState.NotRunning:
-            process.terminate()
-            if not process.waitForFinished(800):
-                process.kill()
+            self._stopping_process_ids.add(id(process))
+            self._stop_process_group(process)
 
     def _load_launch_file(self, path: Path) -> dict:
         try:
@@ -529,157 +650,63 @@ class MainWindow(QMainWindow):
     def _load_launch_settings(self) -> None:
         supervisor = self._load_launch_file(SUPERVISOR_CONFIG)
         params = supervisor.get("motiondock_supervisor", {}).get("ros__parameters", {})
-        self.autonomous_topic_input.setText(str(params.get("autonomous_input_topic", "/motiondock/cmd_vel_autonomous")))
         autonomy = self._load_launch_file(AUTONOMY_CONFIG)
-        if autonomy.get("launch_file"):
-            self.autonomy_status.setText(f"{autonomy.get('package')} · {autonomy.get('launch_file')}")
+        if autonomy.get("command"):
+            self.autonomy_status.setText(f"{autonomy.get('workspace')} · {autonomy.get('command')}")
         camera = self._load_launch_file(CAMERA_CONFIG)
-        if camera.get("mode") == "python_script" and camera.get("script_path"):
-            self.camera_status.setText(f"Python · {Path(camera['script_path']).name}")
-        elif camera.get("launch_file"):
-            self.camera_status.setText(f"{camera.get('package')} · {camera.get('launch_file')}")
-
-    def save_autonomous_topic(self) -> None:
-        topic = self.autonomous_topic_input.text().strip()
-        if not topic or any(char.isspace() for char in topic):
-            QMessageBox.warning(self, "Invalid topic", "Enter a ROS topic name without spaces.")
-            return
-        data = self._load_launch_file(SUPERVISOR_CONFIG)
-        params = data.setdefault("motiondock_supervisor", {}).setdefault("ros__parameters", {})
-        output_topic = str(params.get("output_topic", "/cmd_vel"))
-        manual_topic = str(params.get("manual_input_topic", "/motiondock/cmd_vel_manual"))
-        if topic in (output_topic, manual_topic):
-            QMessageBox.warning(self, "Topic bypasses the gate", "Autonomous input must be separate from the output and manual input topics.")
-            return
-        params["autonomous_input_topic"] = topic
-        try:
-            SUPERVISOR_CONFIG.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
-        except OSError as exc:
-            QMessageBox.critical(self, "Cannot save topic", str(exc))
-            return
-        autonomy = self._load_launch_file(AUTONOMY_CONFIG)
-        autonomy["cmd_vel_topic"] = topic
-        try:
-            AUTONOMY_CONFIG.write_text(yaml.safe_dump(autonomy, sort_keys=False), encoding="utf-8")
-        except OSError as exc:
-            QMessageBox.warning(self, "Topic saved to supervisor", f"Could not update autonomy settings: {exc}")
-        self._restart_supervisor()
-        self._log(f"Autonomous velocity input set to {topic}.")
+        if camera.get("command"):
+            self.camera_status.setText(f"{camera.get('workspace')} · {camera.get('command')}")
 
     def _configure_launch(self, destination: Path, title: str) -> dict | None:
-        workspace_text = QFileDialog.getExistingDirectory(self, f"Choose {title} ROS 2 workspace", str(Path.home()))
-        if not workspace_text:
-            return None
-        workspace = Path(workspace_text).resolve()
-        launch_path_text, _ = QFileDialog.getOpenFileName(
-            self,
-            f"Choose {title} launch file",
-            str(workspace / "src"),
-            "ROS 2 launch files (*.launch.py)",
+        selection = self._choose_folder_command(
+            title,
+            "Commands to run in the selected folder (include ROS/workspace sourcing, then launch):",
+            self._load_launch_file(destination).get("command", ""),
         )
-        if not launch_path_text:
+        if not selection:
             return None
-        launch_path = Path(launch_path_text).resolve()
-        try:
-            launch_path.relative_to(workspace / "src")
-        except ValueError:
-            QMessageBox.warning(self, "Launch file must be in the workspace", "Choose a launch file under the selected workspace's src directory.")
-            return None
-        package_root = next((parent for parent in launch_path.parents if (parent / "package.xml").is_file()), None)
-        if package_root is None:
-            QMessageBox.warning(self, "ROS package not found", "The launch file must be inside a ROS 2 package with package.xml.")
-            return None
-        try:
-            package_name = ET.parse(package_root / "package.xml").getroot().findtext("name")
-        except (OSError, ET.ParseError) as exc:
-            QMessageBox.warning(self, "Invalid package.xml", str(exc))
-            return None
-        if not package_name:
-            QMessageBox.warning(self, "Invalid package.xml", "The package.xml has no package name.")
-            return None
-        config = {
-            "workspace": str(workspace),
-            "package": package_name.strip(),
-            "launch_file": launch_path.name,
-        }
+        workspace, command = selection
+        config = {"workspace": str(workspace), "command": command}
         try:
             old = self._load_launch_file(destination)
             old.update(config)
-            if destination == AUTONOMY_CONFIG:
-                old.setdefault("cmd_vel_topic", self.autonomous_topic_input.text().strip())
             destination.write_text(yaml.safe_dump(old, sort_keys=False), encoding="utf-8")
         except OSError as exc:
-            QMessageBox.critical(self, "Cannot save launch settings", str(exc))
+            QMessageBox.critical(self, "Could not save setup", str(exc))
             return None
         return config
+
+    def _choose_folder_command(self, title: str, prompt: str, previous: str = "") -> tuple[Path, str] | None:
+        folder_text = QFileDialog.getExistingDirectory(
+            self,
+            f"Choose {title} folder or workspace",
+            str(Path.home()),
+            QFileDialog.Option.DontUseNativeDialog,
+        )
+        if not folder_text:
+            return None
+        command, accepted = QInputDialog.getMultiLineText(
+            self,
+            f"Launch {title}",
+            prompt,
+            previous,
+        )
+        command = command.strip()
+        if not accepted or not command:
+            return None
+        return Path(folder_text).resolve(), command
 
     def configure_autonomy_launch(self) -> None:
         config = self._configure_launch(AUTONOMY_CONFIG, "autonomy")
         if config:
-            self.autonomy_status.setText(f"{config['package']} · {config['launch_file']}")
-            self._log(f"Autonomy launch configured: {config['package']} {config['launch_file']}")
+            self.autonomy_status.setText(f"{config['workspace']} · {config['command']}")
+            self._log(f"Autonomy command configured in {config['workspace']}.")
 
     def configure_camera_launch(self) -> None:
-        script_text, _ = QFileDialog.getOpenFileName(
-            self,
-            "Choose Python camera script or ROS 2 launch file",
-            str(Path.home()),
-            "Python files (*.py);;All files (*)",
-        )
-        if not script_text:
-            return
-        script = Path(script_text).resolve()
-        package_root = next((parent for parent in script.parents if (parent / "package.xml").is_file()), None)
-        launch_dir = package_root / "launch" if package_root else None
-        is_ros_launch = bool(
-            package_root
-            and launch_dir
-            and (script.name.endswith(".launch.py") or script.is_relative_to(launch_dir))
-        )
-        if is_ros_launch:
-            source_dir = next((parent for parent in package_root.parents if parent.name == "src"), None)
-            if source_dir is None:
-                QMessageBox.warning(
-                    self,
-                    "ROS workspace not found",
-                    "This launch file is not under a workspace src/ directory. Choose a regular Python camera node instead.",
-                )
-                return
-            try:
-                package_name = ET.parse(package_root / "package.xml").getroot().findtext("name")
-            except (OSError, ET.ParseError) as exc:
-                QMessageBox.warning(self, "Invalid package.xml", str(exc))
-                return
-            if not package_name:
-                QMessageBox.warning(self, "Invalid package.xml", "The launch package has no package name.")
-                return
-            config = {
-                "mode": "ros_launch",
-                "workspace": str(source_dir.parent),
-                "package": package_name.strip(),
-                "launch_file": script.relative_to(launch_dir).as_posix(),
-            }
-        else:
-            workspace = next(
-                (parent for parent in script.parents if (parent / "install" / "setup.bash").is_file()),
-                None,
-            )
-            config = {
-                "mode": "python_script",
-                "script_path": str(script),
-                "workspace": str(workspace) if workspace else "",
-            }
-        try:
-            CAMERA_CONFIG.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
-        except OSError as exc:
-            QMessageBox.critical(self, "Cannot save camera settings", str(exc))
-            return
-        if config["mode"] == "python_script":
-            self.camera_status.setText(f"Python · {script.name}")
-            self._log(f"Camera Python script configured: {script}")
-        else:
-            self.camera_status.setText(f"Ready · {config['package']} · {config['launch_file']}")
-            self._log(f"Camera ROS launch configured: {config['package']} {config['launch_file']}")
+        config = self._configure_launch(CAMERA_CONFIG, "camera")
+        if config:
+            self.camera_status.setText(f"{config['workspace']} · {config['command']}")
+            self._log(f"Camera command configured in {config['workspace']}.")
 
     def _start_supervisor(self) -> None:
         process = QProcess(self)
@@ -708,16 +735,14 @@ class MainWindow(QMainWindow):
         if current and current.state() != QProcess.ProcessState.NotRunning:
             return
         workspace = str(config.get("workspace", ""))
-        if key == "camera" and config.get("mode") == "python_script":
-            command = 'source "/opt/ros/${ROS_DISTRO:-humble}/setup.bash" && if [ -n "$2" ] && [ -f "$2/install/setup.bash" ]; then source "$2/install/setup.bash"; fi && exec python3 "$1"'
-            arguments = ["-lc", command, f"motiondock-{key}", str(config["script_path"]), workspace]
-            working_directory = workspace or str(Path(config["script_path"]).parent)
-        else:
-            command = 'source "/opt/ros/${ROS_DISTRO:-humble}/setup.bash" && source "$1/install/setup.bash" && exec ros2 launch "$2" "$3"'
-            arguments = ["-lc", command, f"motiondock-{key}", workspace, config["package"], config["launch_file"]]
-            working_directory = workspace
+        command = str(config.get("command", "")).strip()
+        if not workspace or not Path(workspace).is_dir() or not command:
+            self._log(f"{key.title()} needs a valid folder and launch command.")
+            return
+        arguments = ["bash", "-lc", f"exec bash -lc {self._shell_quote(command)}", f"motiondock-{key}"]
+        working_directory = workspace
         process = QProcess(self)
-        process.setProgram("bash")
+        process.setProgram("setsid")
         process.setArguments(arguments)
         process.setWorkingDirectory(working_directory)
         process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
@@ -728,22 +753,37 @@ class MainWindow(QMainWindow):
         process.start()
         if key == "camera":
             self.camera_status.setText("Starting camera… · hold Circle 3s to stop")
-        if key == "camera" and config.get("mode") == "python_script":
-            self._log(f"Starting camera Python script: {config['script_path']}")
-        else:
-            self._log(f"Starting {key} ROS 2 launch: {config['package']} {config['launch_file']}")
+        self._log(f"Starting {key} command in {workspace}: {command}")
+
+    @staticmethod
+    def _shell_quote(value: str) -> str:
+        return "'" + value.replace("'", "'\\''") + "'"
 
     def _stop_launch_process(self, key: str) -> None:
         process = self.camera_process if key == "camera" else self.autonomy_process
         if not process or process.state() == QProcess.ProcessState.NotRunning:
             return
-        try:
-            os.kill(int(process.processId()), signal.SIGINT)
-        except (OSError, TypeError, ValueError):
-            process.terminate()
+        self._stop_process_group(process, signal.SIGINT)
         if key == "camera":
             self.camera_status.setText("Stopping camera…")
         self._log(f"Stopping {key} launch.")
+
+    @staticmethod
+    def _stop_process_group(process: QProcess, sig: int = signal.SIGTERM) -> None:
+        """Stop the launch command and its ROS child processes as one session."""
+        try:
+            pid = int(process.processId())
+            if pid > 0:
+                os.killpg(pid, sig)
+                if not process.waitForFinished(1200):
+                    os.killpg(pid, signal.SIGKILL)
+                    process.waitForFinished(500)
+                return
+        except (OSError, TypeError, ValueError):
+            pass
+        process.terminate()
+        if not process.waitForFinished(800):
+            process.kill()
 
     def _launch_finished(self, key: str) -> None:
         if key == "camera":
@@ -752,10 +792,8 @@ class MainWindow(QMainWindow):
 
     def _start_camera(self) -> None:
         config = self._load_launch_file(CAMERA_CONFIG)
-        configured_python = config.get("mode") == "python_script" and config.get("script_path")
-        configured_launch = all(config.get(field) for field in ("workspace", "package", "launch_file"))
-        if not configured_python and not configured_launch:
-            self._set_banner("Configure the camera workspace and launch file first")
+        if not config.get("workspace") or not config.get("command"):
+            self._set_banner("Set the camera folder and launch command first")
             return
         self._start_launch_process("camera", config)
 
@@ -792,7 +830,10 @@ class MainWindow(QMainWindow):
         for key in self._task_labels:
             path = TASKS.assigned_path(key)
             workspace = TASKS.assigned_workspace(key)
-            if workspace:
+            command = TASKS.assigned_command(key)
+            if command:
+                self._show_command_assignment(key, command["path"], command["command"])
+            elif workspace:
                 self._task_labels[key].setText(f"ROS: {workspace['package']} · {workspace['launch_file']}")
             else:
                 self._task_labels[key].setText(f"Assigned: {path.name}" if path else "No task assigned")
@@ -1031,48 +1072,20 @@ class MainWindow(QMainWindow):
 
     def assign_task(self, key: str) -> None:
         control_name = dict((item[0], item[1]) for item in CONTROLS)[key]
-        choice, accepted = QInputDialog.getItem(
-            self,
-            f"Assign task to {control_name}",
-            "Choose a Python/C++ source file or a ROS 2 workspace:",
-            ["Python or C++ source file", "ROS 2 workspace"],
-            0,
-            False,
-        )
-        if not accepted:
-            return
         try:
-            if choice == "ROS 2 workspace":
-                source = QFileDialog.getExistingDirectory(self, "Choose ROS 2 workspace", str(Path.home()))
-                if not source:
-                    return
-                launch_targets = self._workspace_launch_targets(Path(source))
-                if not launch_targets:
-                    QMessageBox.warning(self, "No launch files found", "The selected workspace has no ROS 2 launch files under a package's launch/ folder.")
-                    return
-                labels = [f"{package} · {launch_file}" for package, launch_file in launch_targets]
-                selected, ok = QInputDialog.getItem(self, "Choose workspace launch", "Package · launch file:", labels, 0, False)
-                if not ok:
-                    return
-                package, launch_file = launch_targets[labels.index(selected)]
-                stored_workspace = TASKS.assign_workspace(key, Path(source), package, launch_file)
-                self._task_labels[key].setText(f"ROS: {package} · {launch_file}")
-                self._log(f"Assigned ROS workspace {stored_workspace} ({package} · {launch_file}) to {key}.")
-                return
-            source, _ = QFileDialog.getOpenFileName(
-                self,
-                f"Choose task source for {control_name}",
-                str(Path.home()),
-                "Python or C++ source (*.py *.cpp *.cc *.cxx)",
+            selection = self._choose_folder_command(
+                control_name,
+                "Commands to start this task from the selected folder. Include ROS and workspace sourcing, then the launch command:",
             )
-            if not source:
+            if not selection:
                 return
-            stored = TASKS.assign(key, Path(source))
+            folder, command = selection
+            stored = TASKS.assign_command(key, folder, command)
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, "Could not assign task", str(exc))
             return
-        self._task_labels[key].setText(f"Assigned: {stored.name}")
-        self._log(f"Assigned {stored.name} to {key} and copied it into this workspace.")
+        self._show_command_assignment(key, str(stored), command)
+        self._log(f"Assigned launch commands from {stored} to {key}.")
 
     @staticmethod
     def _workspace_launch_targets(workspace: Path) -> list[tuple[str, str]]:
@@ -1099,28 +1112,67 @@ class MainWindow(QMainWindow):
         return sorted(set(targets))
 
     def choose_autodock_file(self) -> None:
-        source, _ = QFileDialog.getOpenFileName(
-            self,
-            "Choose AutoDock task file",
-            str(Path.home()),
-            "Python or C++ source (*.py *.cpp *.cc *.cxx)",
-        )
-        if not source:
-            return
         try:
-            stored = TASKS.assign("autodock", Path(source))
+            assigned = TASKS.assigned_command("autodock")
+            selection = self._choose_folder_command(
+                "Auto-Dock",
+                "Commands to start Auto-Dock from this folder. Include ROS/workspace sourcing, then the launch command:",
+                assigned["command"] if assigned else "",
+            )
+            if not selection:
+                return
+            folder, command = selection
+            stored = TASKS.assign_command("autodock", folder, command)
         except (OSError, ValueError) as exc:
-            QMessageBox.warning(self, "Could not use AutoDock file", str(exc))
+            QMessageBox.warning(self, "Could not configure Auto-Dock", str(exc))
             return
-        self._log(f"AutoDock file saved in the workspace: {stored.relative_to(WORKSPACE)}")
+        self._log(f"Auto-Dock command saved for {stored}.")
         self.run_task("autodock")
 
+    def _autodock_pressed(self) -> None:
+        process = self._processes.get("autodock")
+        self._autodock_was_running_on_press = bool(
+            process and process.state() != QProcess.ProcessState.NotRunning
+        )
+        self._autodock_hold_started = time.monotonic()
+        if self._autodock_was_running_on_press:
+            self._autodock_hold_timer.start()
+
+    def _update_autodock_hold(self) -> None:
+        if self._autodock_hold_started is None or not self._autodock_was_running_on_press:
+            return
+        if time.monotonic() - self._autodock_hold_started >= 3.0:
+            self._autodock_hold_timer.stop()
+            self._stop_assigned_task("autodock")
+            self._set_banner("Stopping Auto-Dock…")
+
+    def _autodock_released(self) -> None:
+        was_running = self._autodock_was_running_on_press
+        held_to_stop = (
+            was_running
+            and self._autodock_hold_started is not None
+            and time.monotonic() - self._autodock_hold_started >= 3.0
+        )
+        self._autodock_hold_timer.stop()
+        self._autodock_hold_started = None
+        self._autodock_was_running_on_press = False
+        if was_running and not held_to_stop:
+            self._set_banner("Auto-Dock is running · hold the button for 3 seconds to stop")
+        elif not held_to_stop:
+            self.choose_autodock_file()
+
     def run_task(self, key: str) -> None:
+        command_assignment = TASKS.assigned_command(key)
+        if command_assignment:
+            active = self._processes.get(key)
+            if active and active.state() != QProcess.ProcessState.NotRunning:
+                return
+            self._launch_shell_command(key, command_assignment["path"], command_assignment["command"])
+            return
         workspace = TASKS.assigned_workspace(key)
         if workspace:
             active = self._processes.get(key)
             if active and active.state() != QProcess.ProcessState.NotRunning:
-                self._log(f"Task {key} is already running.")
                 return
             workspace_path = Path(workspace["path"])
             self._launch_process(
@@ -1139,7 +1191,6 @@ class MainWindow(QMainWindow):
             return
         active = self._processes.get(key)
         if active and active.state() != QProcess.ProcessState.NotRunning:
-            self._log(f"Task {key} is already running.")
             return
         if TASKS.is_cpp(path):
             self._launch_process(
@@ -1151,6 +1202,23 @@ class MainWindow(QMainWindow):
         else:
             self._launch_process(key, sys.executable, [str(path)], phase="run")
         self._log(f"Starting task: {path.name}")
+
+    def _launch_shell_command(self, key: str, folder: str, command: str) -> None:
+        process = QProcess(self)
+        process.setProgram("setsid")
+        process.setArguments(["bash", "-lc", f"exec bash -lc {self._shell_quote(command)}", f"motiondock-{key}"])
+        process.setWorkingDirectory(folder)
+        process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        process.readyReadStandardOutput.connect(lambda p=process, k=key: self._read_task_output(k, p))
+        process.finished.connect(
+            lambda code, _status, k=key, p=process: self._task_finished(k, p, "run", code)
+        )
+        process.errorOccurred.connect(lambda error, k=key, p=process: self._task_process_error(k, p, error))
+        self._processes[key] = process
+        process.start()
+        self._log(f"Starting {key} command in {folder}: {command}")
+        if key == "autodock":
+            self.autodock_button.setText("⚡  Auto-Dock · hold 3s to stop")
 
     def _launch_process(
         self,
@@ -1169,7 +1237,7 @@ class MainWindow(QMainWindow):
         process.finished.connect(
             lambda code, _status, k=key, p=process, current_phase=phase: self._task_finished(k, p, current_phase, code)
         )
-        process.errorOccurred.connect(lambda error, k=key: self._log(f"Could not launch {k}: {error}"))
+        process.errorOccurred.connect(lambda error, k=key, p=process: self._task_process_error(k, p, error))
         self._processes[key] = process
         process.start()
 
@@ -1179,10 +1247,21 @@ class MainWindow(QMainWindow):
             for line in output.splitlines():
                 self._log(f"[{key}] {line}")
 
+    def _task_process_error(self, key: str, process: QProcess, error) -> None:
+        if id(process) not in self._stopping_process_ids:
+            self._log(f"Could not launch {key}: {error}")
+
     def _task_finished(self, key: str, process: QProcess, phase: str, exit_code: int) -> None:
         self._read_task_output(key, process)
+        stopped_by_user = id(process) in self._stopping_process_ids
+        self._stopping_process_ids.discard(id(process))
         if self._processes.get(key) is process:
             self._processes.pop(key, None)
+        if key == "autodock":
+            self.autodock_button.setText("⚡  Auto-Dock")
+        if stopped_by_user:
+            self._log(f"Task {key} stopped.")
+            return
         if phase == "build" and exit_code == 0:
             path = TASKS.assigned_path(key)
             if path is not None:
@@ -1357,8 +1436,9 @@ class MainWindow(QMainWindow):
                         self._set_banner("Camera running · keep holding Circle for 3 seconds to stop")
                     else:
                         self._start_camera()
-                elif TASKS.assigned_path(key) or TASKS.assigned_workspace(key):
+                elif TASKS.assigned_path(key) or TASKS.assigned_workspace(key) or TASKS.assigned_command(key):
                     self.run_task(key)
+        self._update_assigned_task_holds(current)
         camera_button = self._input_config.get("camera_button", "circle")
         camera_pressed = current.get(camera_button, False)
         if camera_pressed and self._camera_hold_started and not self._camera_stop_triggered:
@@ -1402,6 +1482,33 @@ class MainWindow(QMainWindow):
             )
         self.bridge.publish(self.mode, linear, angular)
 
+    def _update_assigned_task_holds(self, current: dict[str, bool]) -> None:
+        now = time.monotonic()
+        for key in self._status_labels:
+            if key == "circle":
+                continue  # Circle has its own camera hold behavior.
+            task = self._processes.get(key)
+            autonomy = self.autonomy_process if key == "triangle" else None
+            process_running = any(
+                process and process.state() != QProcess.ProcessState.NotRunning
+                for process in (task, autonomy)
+            )
+            pressed = bool(current.get(key, False))
+            if pressed and process_running and key not in self._task_stop_triggered:
+                started = self._task_hold_started.setdefault(key, now)
+                remaining = 3.0 - (now - started)
+                if remaining <= 0:
+                    self._task_stop_triggered.add(key)
+                    self._stop_assigned_task(key)
+                    if autonomy and autonomy.state() != QProcess.ProcessState.NotRunning:
+                        self._stop_launch_process("autonomy")
+                    self._set_banner(f"Stopping {key.replace('_', ' ').title()} task…")
+                else:
+                    self._set_banner(f"Hold {key.replace('_', ' ').title()} for {remaining:.1f}s to stop")
+            elif not pressed:
+                self._task_hold_started.pop(key, None)
+                self._task_stop_triggered.discard(key)
+
     @staticmethod
     def _set_label_text(label: QLabel, text: str) -> None:
         if label.text() != text:
@@ -1419,9 +1526,7 @@ class MainWindow(QMainWindow):
                     process.kill()
         for process in self._processes.values():
             if process.state() != QProcess.ProcessState.NotRunning:
-                process.terminate()
-                if not process.waitForFinished(800):
-                    process.kill()
+                self._stop_process_group(process)
         if self.supervisor_process and self.supervisor_process.state() != QProcess.ProcessState.NotRunning:
             self.supervisor_process.terminate()
             if not self.supervisor_process.waitForFinished(1200):

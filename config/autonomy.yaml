@@ -1,4 +1,2 @@
 workspace: ''
-package: ''
-launch_file: ''
-cmd_vel_topic: /motiondock/cmd_vel_autonomous
+command: ''

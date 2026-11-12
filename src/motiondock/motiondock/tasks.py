@@ -81,6 +81,32 @@ class TaskManager:
         self.registry_path.write_text(yaml.safe_dump(registry, sort_keys=True), encoding="utf-8")
         return workspace
 
+    def assign_command(self, key: str, folder: Path, command: str) -> Path:
+        """Store an operator-entered command for a selected folder."""
+        if not TASK_KEY.fullmatch(key):
+            raise ValueError("Invalid task identifier")
+        folder = folder.expanduser().resolve(strict=True)
+        if not folder.is_dir():
+            raise ValueError("Choose an existing folder")
+        command = command.strip()
+        if not command:
+            raise ValueError("Enter the commands needed to launch this task")
+        registry = self.registry()
+        registry[key] = {"kind": "command", "path": str(folder), "command": command}
+        self.registry_path.parent.mkdir(parents=True, exist_ok=True)
+        self.registry_path.write_text(yaml.safe_dump(registry, sort_keys=True), encoding="utf-8")
+        return folder
+
+    def assigned_command(self, key: str) -> dict[str, str] | None:
+        value = self.registry().get(key)
+        if not isinstance(value, dict) or value.get("kind") != "command":
+            return None
+        folder = Path(str(value.get("path", ""))).expanduser()
+        command = str(value.get("command", "")).strip()
+        if not folder.is_dir() or not command:
+            return None
+        return {"path": str(folder.resolve()), "command": command}
+
     def assigned_workspace(self, key: str) -> dict[str, str] | None:
         value = self.registry().get(key)
         if not isinstance(value, dict) or value.get("kind") != "workspace":

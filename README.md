@@ -187,34 +187,24 @@ The supervisor provides:
 
 Robot-specific topic names and velocity limits can be adjusted through the configuration files.
 
+The robot motor controller should subscribe to `/cmd_vel`. Autonomy launch commands must remap their velocity output to `/motiondock/cmd_vel_autonomous` so the supervisor can enforce mode exclusivity.
+
 ---
 
 ## Camera and Autonomous Launch Configuration
 
-MotionDock supports configurable camera and autonomous launch integration.
-
-Configuration files allow the operator to specify the relevant workspace, launch configuration and associated parameters without changing the main application logic.
+Use **Set autonomy folder & command** and **Setup camera** to choose a workspace/folder and enter the commands needed to source ROS and launch each system. Selecting Autonomous starts the configured autonomy command; selecting Manual or STOP stops it. Circle starts the camera, and holding Circle for three seconds stops it.
 
 ---
 
 ## Task Management
 
-MotionDock supports assigning and executing user-defined Python and C++ tasks.
-
-### Python Tasks
-- Assign Python task files through the GUI.
-- Execute assigned tasks through the application.
-- Use ROS 2 interfaces as required by the task.
-
-### C++ Tasks
-- Assign C++ source files.
-- Build tasks through the `motiondock_user_tasks` package.
-- Execute the resulting task through MotionDock.
+Use **Assign task** beside a controller control to choose its folder and enter its ROS/workspace sourcing and launch commands. Pressing that controller button starts the command; holding the same button for three seconds stops it. Each controller card displays its assigned folder and command.
 
 ### Auto-Dock
-Auto-Dock provides a dedicated interface for selecting and executing supported task files.
+Auto-Dock uses the same folder-and-command setup. While it is running, hold the Auto-Dock app button for three seconds to stop it. Commands run in a shell to allow sourcing and launch command chains; only enter commands you trust.
 
-**Security note:** Assigned task files execute as programs on the host system. Only assign and execute trusted source files.
+**Security note:** User-entered commands execute on the host system. Only enter commands you trust.
 
 ---
 
