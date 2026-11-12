@@ -8,12 +8,6 @@ MotionDock is a modular, single-robot control and supervision platform built on 
 
 ---
 
-## Demo
-
-[![MotionDock overview](docs/images/motiondock_controller_mapping.png)](https://github.com/saitejavarma801/MotionDock)
-
----
-
 ## Key Features
 
 ### 1. Controller-Based Operation
