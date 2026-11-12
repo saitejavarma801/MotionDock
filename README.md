@@ -2,231 +2,308 @@
 
 **ROS 2-Based Robotic Control, Supervision and Task Management Platform**
 
-MotionDock is a modular, single-robot control and supervision platform built on ROS 2. It provides a PySide6 desktop interface for manual operation, autonomous navigation, controller input management, task execution and centralized robot command supervision.
+MotionDock is a modular, single-robot control and supervision platform built on ROS 2. Its PySide6 desktop application brings controller-based manual driving, autonomous launch control, camera management, configurable task execution and centralized velocity-command supervision into one interface.
 
-**ROS 2 Compatibility:** Humble | Jazzy
+**ROS 2 compatibility:** Humble | Jazzy
+
+---
+
+## Demo
+
+[![MotionDock overview](docs/images/motiondock_controller_mapping.png)](https://github.com/saitejavarma801/MotionDock)
 
 ---
 
 ## Key Features
 
 ### 1. Controller-Based Operation
-- PlayStation controller integration.
-- Real-time controller input monitoring.
-- Configurable button and joystick mappings.
-- Interactive controller input learning.
+- PlayStation controller integration through the controller-monitoring layer.
+- Live display of controller connection, button and axis activity.
+- Configurable button indices, joystick axes, trigger thresholds, dead zones and input directions.
+- Interactive **Learn controller inputs** workflow for discovering controller indices.
+- Controller connection and read diagnostics, including fallback handling for R2 input.
 
 ### 2. Operating Modes
-- **Manual Mode:** Direct robot control using the PlayStation controller.
-- **Autonomous Mode:** Allows configured autonomous navigation nodes to control the robot.
-- **STOP Mode:** Blocks motion commands and sends zero velocity.
+- **Manual:** Controller-driven velocity commands.
+- **Autonomous:** Enables the configured autonomous command source and can launch the selected autonomy workspace/command.
+- **STOP:** Revokes motion authorization and commands zero velocity through the supervisor.
+- Mode selection is available from the application and the mapped controller buttons.
 
 ### 3. Safety and Command Supervision
-- Centralized velocity command management.
-- R2 dead-man switch for manual driving authorization.
-- Controller disconnection detection.
-- Command timeout and GUI heartbeat monitoring.
+- A dedicated ROS 2 supervisor is the single authorized output gate to the robot's `/cmd_vel` topic.
+- Manual and autonomous velocity commands use separate input topics.
+- Manual driving requires the R2 dead-man input while Manual mode is active.
+- Controller loss revokes manual driving authorization.
 - Configurable linear and angular velocity limits.
+- Command timeout monitoring and GUI heartbeat monitoring.
+- The supervisor switches to STOP when its GUI heartbeat becomes stale and publishes zero velocity when stopped or when valid input is absent/stale.
 
-### 4. Camera and Autonomous Navigation
-- Configurable camera launch integration.
-- Autonomous launch integration.
-- Mode-based command switching through the supervisor.
+### 4. Camera and Autonomous Launch Control
+- Configure a camera workspace/folder and launch command from the GUI.
+- Configure an autonomous workspace/folder and launch command.
+- Start and stop the configured camera process from the controller.
+- Start autonomy from Autonomous mode; selecting Manual or STOP stops the configured autonomy process.
 
 ### 5. Task Management
-- Python and C++ task assignment.
-- Controller-triggered task execution.
-- Dynamic C++ task building.
-- Dedicated Auto-Dock task execution.
+- Assign tasks to controller controls from the GUI.
+- Support for user-provided Python and C++ task sources.
+- Configure task workspace/folder, ROS environment sourcing and launch commands.
+- Press an assigned controller button to start its task; hold the same button for three seconds to stop it.
+- C++ task sources placed in the user-task package are discovered and built as individual task executables during a workspace build.
+- Task controls display their configured assignment and runtime state.
 
-### PlayStation Controller – Default Button Mapping
+### 6. Auto-Dock
+- Dedicated Auto-Dock control in the application.
+- Configure its workspace and launch command through the application.
+- Hold the Auto-Dock application button for three seconds to stop a running Auto-Dock process.
 
-The following image illustrates the default controller assignments.
+### 7. Application Interface
+- Single-page desktop control dashboard.
+- Live controller diagnostics and mode/status indicators.
+- Resizable controls and improved task/launch control layout.
+
+---
+
+## PlayStation Controller – Default Mapping
+
+The following mapping is the default configuration. Controller button and axis indices, trigger direction and thresholds can be adapted in `config/controller.yaml` and through the application.
 
 ![MotionDock PlayStation Controller Mapping](docs/images/motiondock_controller_mapping.png)
 
-| Controller Input | Default Function |
+| Controller input | Default function |
 |---|---|
-| Cross (X) | Select Manual Mode |
-| Triangle (△) | Select Autonomous Mode |
-| Square (□) | Select STOP Mode |
+| Cross (X) | Select Manual mode |
+| Triangle (△) | Select Autonomous mode |
+| Square (□) | Select STOP mode |
 | Circle (○) | Camera control — press to start; hold for 3 seconds to stop |
-| R2 | Manual driving authorization (dead-man switch) |
-| Left Stick – Up/Down | Linear velocity control |
-| Left Stick – Left/Right | Angular velocity control |
+| R2 | Manual driving authorization (dead-man input) |
+| Left stick – Up/Down | Linear velocity control |
+| Left stick – Left/Right | Angular velocity control |
 
-**Important controller behaviour:**
-- Manual driving requires Manual Mode and continuous R2 authorization.
-- Releasing R2 revokes manual driving permission.
-- Disconnecting the controller stops manual command forwarding.
+**Manual driving behaviour**
+- Manual mode must be selected before manual velocity commands are authorized.
+- R2 must remain held above the configured trigger threshold while driving.
+- Releasing R2 revokes manual driving authorization.
+- Controller disconnection stops manual command forwarding.
 - After reconnecting, the operator must re-authorize manual driving.
-- Controller mappings and input thresholds can be configured through the application.
+- Input thresholds, hysteresis, dead zone, axis directions and controller indices are configurable.
 
 ---
-<img width="1774" height="887" alt="image" src="https://github.com/user-attachments/assets/ec1a1fd8-f6c0-4f14-a9f9-6093de0d6244" />
 
-## Download, Install Dependencies, Build and Launch
+## Installation
 
-MotionDock supports ROS 2 Humble and ROS 2 Jazzy. Select the appropriate ROS distribution for your environment and use it consistently throughout the build and launch process.
+MotionDock supports ROS 2 Humble and Jazzy on Ubuntu-based ROS 2 environments. Use one ROS distribution consistently for dependency installation, building and launching.
 
-### 1. Clone the Repository
+### 1. Clone the repository
 
 ```bash
 git clone https://github.com/saitejavarma801/MotionDock.git
 cd MotionDock
 ```
 
-### 2. Create the Python Virtual Environment
+### 2. Install system dependencies and create a virtual environment
 
-Create a virtual environment with access to the system-installed ROS 2 Python packages:
+The virtual environment must have access to the system-installed ROS 2 Python packages.
 
 ```bash
-sudo apt install -y python3-full python3-venv
+sudo apt update
+sudo apt install -y python3-full python3-venv python3-rosdep \
+  python3-colcon-common-extensions build-essential
 
 python3 -m venv --system-site-packages .venv
 ```
 
-### 3. Install Python Dependencies
+### 3. Source ROS 2
 
-```bash
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -r requirements.txt
-```
-
-### 4. Source the ROS 2 Environment
-
-For ROS 2 Humble:
+For Humble:
 
 ```bash
 source /opt/ros/humble/setup.bash
 ```
 
-For ROS 2 Jazzy:
+For Jazzy:
 
 ```bash
 source /opt/ros/jazzy/setup.bash
 ```
 
-Use only the ROS distribution installed and selected for your workspace.
-
-### 5. Install ROS Package Dependencies
+### 4. Install Python and ROS package dependencies
 
 ```bash
-sudo apt install -y python3-rosdep python3-colcon-common-extensions build-essential
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -r requirements.txt
 
+rosdep update
 rosdep install --from-paths src --ignore-src -r -y
 ```
 
-### 6. Build the Workspace
-
-Build using the Python interpreter from the virtual environment:
+### 5. Build the workspace
 
 ```bash
 .venv/bin/python -m colcon build --symlink-install
 ```
 
-Using the virtual environment's Python interpreter ensures that the installed ROS 2 Python executables use the environment containing the MotionDock dependencies.
-
-### 7. Source the Workspace
+### 6. Source the workspace
 
 ```bash
 source install/setup.bash
 ```
 
-### 8. Launch MotionDock
+### 7. Launch MotionDock
+
+Start the desktop application:
 
 ```bash
 ros2 run motiondock motiondock
 ```
 
-The MotionDock GUI will start, and the application will initialize its command supervision functionality.
+The application starts its ROS 2 GUI bridge and command-supervision functionality. The supervisor is also installed as a separate executable:
+
+```bash
+ros2 run motiondock motiondock_supervisor
+```
+
+Run only one supervisor instance for a robot command path.
 
 ---
 
 ## Operating Modes
 
 ### Manual Mode
-Manual control is enabled when:
-1. A supported controller is connected.
-2. Manual Mode is selected.
-3. The R2 trigger is held above its configured threshold.
 
-The left joystick controls linear and angular velocity. Releasing R2 removes manual driving authorization.
+Manual velocity commands are authorized only when:
+1. A supported controller is connected.
+2. Manual mode is selected.
+3. The R2 dead-man input is active above its configured threshold.
+
+The left stick controls linear and angular velocity. Releasing R2 or losing the controller removes manual driving authorization.
 
 ### Autonomous Mode
+
 Autonomous nodes should publish velocity commands to:
 
 ```text
 /motiondock/cmd_vel_autonomous
 ```
 
-The supervisor forwards autonomous commands to the robot only when Autonomous Mode is active.
+The supervisor forwards autonomous commands to the final robot output only while Autonomous mode is selected. Configure the autonomy launch command to remap its velocity output to this topic.
 
 ### STOP Mode
-STOP Mode blocks manual and autonomous motion commands and commands zero velocity through the supervisor.
+
+STOP mode blocks both manual and autonomous motion commands and publishes zero velocity through the supervisor.
 
 ---
 
-## Command Supervision
+## ROS 2 Command Supervision
 
-MotionDock uses a centralized supervisor to manage robot velocity commands.
+The supervisor provides a single authorized velocity-command path from the selected source to the robot.
 
-| Interface | Default ROS 2 Topic | Purpose |
+| Interface | Default ROS 2 topic | Purpose |
 |---|---|---|
-| Final velocity output | `/cmd_vel` | Robot velocity command |
-| Manual input | `/motiondock/cmd_vel_manual` | Manual velocity commands |
-| Autonomous input | `/motiondock/cmd_vel_autonomous` | Autonomous velocity commands |
-| Operating mode | `/motiondock/mode` | Current operating mode |
+| Final velocity output | `/cmd_vel` | Velocity command for the robot base |
+| Manual input | `/motiondock/cmd_vel_manual` | Controller-generated manual velocity |
+| Autonomous input | `/motiondock/cmd_vel_autonomous` | Velocity from the autonomous stack |
+| Operating mode | `/motiondock/mode` | Current mode: `manual`, `autonomous` or `stop` |
 
-The supervisor provides:
-- Mode-based command selection.
-- Linear and angular velocity limiting.
-- Command timeout monitoring.
-- GUI heartbeat monitoring.
-- Zero-velocity output when command authorization or valid input is lost.
+### Supervisor behaviour
+- Selects the permitted velocity source based on the current mode.
+- Enforces configured linear and angular velocity limits.
+- Monitors input command age and stops forwarding stale commands.
+- Monitors GUI heartbeat; a heartbeat timeout switches the gate to STOP.
+- Publishes zero velocity when STOP is active or valid authorized input is missing/stale.
 
-Robot-specific topic names and velocity limits can be adjusted through the configuration files.
+### Default supervisor parameters
 
-The robot motor controller should subscribe to `/cmd_vel`. Autonomy launch commands must remap their velocity output to `/motiondock/cmd_vel_autonomous` so the supervisor can enforce mode exclusivity.
+| Parameter | Default | Description |
+|---|---:|---|
+| Maximum linear velocity | `0.3 m/s` | Absolute linear velocity limit |
+| Maximum angular velocity | `0.8 rad/s` | Absolute angular velocity limit |
+| Command timeout | `0.35 s` | Maximum allowed age for a valid command/heartbeat |
+
+These values are defaults from `config/supervisor.yaml` and can be adjusted for the robot platform. Verify safe limits on the target robot before operation.
+
+The robot base controller should subscribe to `/cmd_vel`. The autonomous stack must remap its output to `/motiondock/cmd_vel_autonomous`; do not publish around the supervisor if mode exclusivity and its limits are required.
 
 ---
 
 ## Camera and Autonomous Launch Configuration
 
-Use **Set autonomy folder & command** and **Setup camera** to choose a workspace/folder and enter the commands needed to source ROS and launch each system. Selecting Autonomous starts the configured autonomy command; selecting Manual or STOP stops it. Circle starts the camera, and holding Circle for three seconds stops it.
+Use **Setup camera** to choose the camera workspace/folder and enter the commands required to source the ROS environment and launch the camera node or launch file.
+
+Use **Set autonomy folder & command** to configure the autonomy workspace/folder and its launch command.
+
+- Circle starts the configured camera process.
+- Hold Circle for three seconds to stop the camera process.
+- Selecting Autonomous starts the configured autonomy command.
+- Selecting Manual or STOP stops the configured autonomy process.
+
+Commands are launched in a shell so that environment-sourcing and launch-command chains can be used.
 
 ---
 
 ## Task Management
 
-Use **Assign task** beside a controller control to choose its folder and enter its ROS/workspace sourcing and launch commands. Pressing that controller button starts the command; holding the same button for three seconds stops it. Each controller card displays its assigned folder and command.
+Use **Assign task** beside a controller control to configure its task.
+
+Depending on the task type, MotionDock supports:
+- Python source files stored in the workspace user-task area.
+- C++ source files stored in `src/motiondock_user_tasks/tasks`.
+- Workspace-based tasks configured with a ROS workspace, package and launch file.
+- Custom shell commands with the required ROS/workspace sourcing and launch sequence.
+
+Pressing the assigned controller button starts its task. Holding the same button for three seconds stops it. The application displays task assignment and status.
+
+### Building C++ user tasks
+
+C++ task sources in `src/motiondock_user_tasks/tasks` are discovered by the user-task package's CMake configuration and built as separate executables during the workspace build.
+
+After adding or changing a C++ task, rebuild:
+
+```bash
+.venv/bin/python -m colcon build --symlink-install
+source install/setup.bash
+```
 
 ### Auto-Dock
-Auto-Dock uses the same folder-and-command setup. While it is running, hold the Auto-Dock app button for three seconds to stop it. Commands run in a shell to allow sourcing and launch command chains; only enter commands you trust.
 
-**Security note:** User-entered commands execute on the host system. Only enter commands you trust.
+Auto-Dock has a dedicated application control and configurable workspace/launch command. While Auto-Dock is running, hold its application button for three seconds to stop it.
+
+**Security note:** User-configured task and launch commands execute on the host system. Only configure commands and source files you trust.
 
 ---
 
 ## Configuration
 
-MotionDock uses YAML configuration files to manage application behaviour.
+MotionDock reads YAML files from the workspace `config` directory.
 
-| Configuration File | Purpose |
+| Configuration file | Purpose |
 |---|---|
-| `controller.yaml` | Controller mappings, trigger thresholds and joystick settings |
-| `supervisor.yaml` | ROS topics, velocity limits and command timeout parameters |
+| `controller.yaml` | Controller button/axis mapping, R2 trigger settings, threshold, hysteresis, stick dead zone and manual velocity limits |
+| `supervisor.yaml` | ROS topics, velocity limits and command timeout |
 | `autonomy.yaml` | Autonomous workspace and launch configuration |
 | `camera.yaml` | Camera launch configuration |
-| `tasks.yaml` | Assigned Python and C++ tasks |
+| `tasks.yaml` | User task registry |
 
-Configuration values can be modified to adapt MotionDock to different robot platforms and operating requirements.
+The GUI also uses an interface configuration file when present. Configuration values can be adjusted to match a controller and robot platform.
+
+### Current default control parameters
+
+The checked-in controller defaults include:
+- R2 trigger axis: index `5`, active when positive.
+- R2 trigger threshold: `0.3`, with `0.08` hysteresis.
+- Left-stick linear axis: index `1`.
+- Left-stick angular axis: index `0`.
+- Stick dead zone: `0.08`.
+- Manual linear velocity limit: `0.3 m/s`.
+- Manual angular velocity limit: `0.8 rad/s`.
+
+Controller-specific index layouts may differ. Use the controller-learning and configuration tools to verify the correct inputs for your device.
 
 ---
 
 ## ROS 2 Monitoring
 
-The following commands can be used to inspect MotionDock while it is running.
+Inspect the ROS 2 graph while MotionDock is running:
 
 List active nodes:
 
@@ -240,10 +317,22 @@ List active topics:
 ros2 topic list
 ```
 
-Monitor the final velocity command:
+Monitor final robot velocity:
 
 ```bash
 ros2 topic echo /cmd_vel
+```
+
+Monitor manual velocity input:
+
+```bash
+ros2 topic echo /motiondock/cmd_vel_manual
+```
+
+Monitor autonomous velocity input:
+
+```bash
+ros2 topic echo /motiondock/cmd_vel_autonomous
 ```
 
 Monitor the current operating mode:
@@ -256,44 +345,55 @@ ros2 topic echo /motiondock/mode
 
 ## Rebuilding After Code Changes
 
-After modifying the source code, rebuild the workspace using the selected ROS distribution.
+After modifying the source code, source the same ROS distribution used for the workspace, rebuild and re-source the install space.
+
+For Humble:
 
 ```bash
-source /opt/ros/<your_ros_distribution>/setup.bash
-
+source /opt/ros/humble/setup.bash
 cd ~/MotionDock
-
 .venv/bin/python -m colcon build --symlink-install
-
 source install/setup.bash
 ```
 
-Replace `<your_ros_distribution>` with `humble` or `jazzy`.
+For Jazzy, replace `humble` with `jazzy`.
 
 ---
 
 ## Safety Considerations
 
 - Manual driving requires continuous R2 dead-man authorization.
-- Controller disconnection must revoke manual driving permission.
-- Operating-mode selection controls which command source is authorized.
-- Velocity limits and command timeouts are configurable.
-- STOP functionality commands zero velocity through the software supervisor.
-- Software safeguards do not replace an independent hardware emergency-stop circuit.
+- Controller disconnection revokes manual command forwarding.
+- Mode selection determines which velocity-command source is authorized.
+- Velocity limits, command timeouts and heartbeat monitoring are software safeguards.
+- STOP commands zero velocity through the software supervisor; it is **not** a safety-rated emergency stop.
+- Software safeguards do not replace independent hardware safety systems.
 
-**Always implement and verify an independent hardware emergency stop before operating the robot on physical hardware.**
+**Always implement and verify an independent hardware emergency-stop circuit before operating a physical robot.**
 
 ---
 
 ## Compatibility
 
-| Component | Supported Environment |
+| Component | Supported environment |
 |---|---|
-| ROS 2 | Humble |
-| ROS 2 | Jazzy |
-| Operating System | Ubuntu-based ROS 2 environments |
-| GUI Framework | PySide6 |
-| Programming Languages | Python and C++ |
-| Build System | Colcon and CMake |
+| ROS 2 | Humble, Jazzy |
+| Operating system | Ubuntu-based ROS 2 environments |
+| GUI framework | PySide6 |
+| Controller input | PlayStation-compatible game controllers via SDL/pygame |
+| Programming languages | Python and C++ |
+| Build system | Colcon, ament and CMake |
 
 ---
+
+## License
+
+See the repository license and package metadata for licensing information.
+
+## Contributing
+
+Issues and contributions are welcome. Please open an issue to report bugs, request features or discuss improvements.
+
+---
+
+**Repository:** https://github.com/saitejavarma801/MotionDock
